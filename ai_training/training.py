@@ -4,7 +4,25 @@ from neural_network import NeuralNetwork
 import numpy as np
 import pprint
 
-env = BusWorldEnv(render_mode="human")
+env = BusWorldEnv(
+    render_mode="human",
+    routes=[
+        {
+            "name": "A",
+            "stops": [(0, 10), (1, 48)],  # stores (stop_id, prev_dist)
+        },
+        {"name": "B", "stops": [(1, 15), (2, 15), (0, 30)]},
+        {"name": "C", "stops": [(0, 15), (1, 15)]},
+    ],
+    switch_costs=[
+        (0, 1, 15),
+        (1, 2, 15),
+        (2, 0, 15),
+    ],
+    bus_count=2,
+    stops_count=3,
+    max_students=30,
+)
 state, _ = env.reset()
 pprint.pp(env.get_full_state())
 

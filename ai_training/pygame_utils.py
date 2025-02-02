@@ -5,6 +5,10 @@ import pygame.freetype
 
 
 def vec_interp(a, b, t):
+    if t > 1:
+        t = 1
+    if t < 0:
+        t = 0
     return vec_add_v(vec_mult_s(a, (1 - t)), vec_mult_s(b, t))
 
 

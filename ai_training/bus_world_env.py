@@ -24,7 +24,7 @@ class BusWorldEnv(gym.Env):
         self,
         render_mode: str = None,
         max_students: int = 100,
-        stops: int = 6,
+        stops_count: int = 6,
         routes=[
             {
                 "name": "A",
@@ -50,16 +50,17 @@ class BusWorldEnv(gym.Env):
             (5, 0, 15),
             (5, 2, 15),
         ],
-        buses: int = 10,
+        bus_count: int = 10,
         bus_speed: float = 1,
         settings={
+            "bus_size": 10,  # number of students we can store on each bus
             "unload_timespan": (3, 5),
             "break_timespan": (5, 20),
             "break_on_stop_prob": 0.05,
         },
         render_delta_ms: int = 41,
         tick_delta: int = 1,
-        window_size: int = 512,
+        window_size: int = 720,
     ):
         """
         routes: [
@@ -98,13 +99,16 @@ class BusWorldEnv(gym.Env):
         max_route_length: int = 0
         for route in routes:
             tot_dist = 0
+            stops_set = set()
             for i in range(len(route["stops"])):
                 id, prev_dist = route["stops"][i]
+                stops_set.add(id)
                 if i > 0:
                     tot_dist += prev_dist
                 route["stops"][i] = (id, prev_dist, tot_dist)
             route["length"] = tot_dist + route["stops"][0][1]
             max_route_length = max(max_route_length, tot_dist)
+            route["stops_set"] = stops_set
 
         # [edge (a, b)] -> [routes]
         self.edges_to_base_routes = defaultdict(set)
@@ -126,7 +130,7 @@ class BusWorldEnv(gym.Env):
 
         self.state = {}
         self.runtime_state = {}
-        self.stops_adj_mat = np.full(shape=(stops, stops), fill_value=-1)
+        self.stops_adj_mat = np.full(shape=(stops_count, stops_count), fill_value=-1)
         for a, b, cost in switch_costs:
             self.stops_adj_mat[a, b] = cost
             self.stops_adj_mat[b, a] = cost
@@ -134,34 +138,22 @@ class BusWorldEnv(gym.Env):
         # A snapshot of the world of buses and students
         self.observation_space = spaces.Dict(
             {
-                "routes": spaces.Tuple(
+                # stops[] = {
+                #   students: [dest_stop1_count, dest_stop2_count, dest_stop3_count, ...]
+                # }
+                "stops": spaces.Tuple(
                     [
                         spaces.Dict(
                             {
-                                # bus stops
-                                "stops": spaces.Tuple(
+                                "students": spaces.Tuple(
                                     [
-                                        spaces.Dict(
-                                            {
-                                                # students[destination] = count			Array of students and destination
-                                                "students": spaces.Tuple(
-                                                    [
-                                                        spaces.Box(
-                                                            low=0,
-                                                            high=max_students,
-                                                            dtype=np.int64,
-                                                        )
-                                                        for _ in routes
-                                                    ]
-                                                ),
-                                            }
-                                        )
-                                        for stop_pos in stops
+                                        spaces.Discrete(max_students)
+                                        for _ in range(stops_count)
                                     ]
-                                )
+                                ),
                             }
                         )
-                        for name, stops, length in routes
+                        for _ in range(stops_count)
                     ]
                 ),
                 # buses[] = (position, students)[]		Array of buses
@@ -179,17 +171,17 @@ class BusWorldEnv(gym.Env):
                                 "state": spaces.Discrete(4),
                                 # position of the bus
                                 "position": spaces.Box(low=0, high=max_route_length),
-                                # students on the bus and their destinations
+                                # students on the bus and their destination stops
                                 # students[destination] = count
                                 "students": spaces.Tuple(
                                     [
-                                        spaces.Box(low=0, high=max_students)
-                                        for _ in routes
+                                        spaces.Discrete(max_students)
+                                        for _ in range(stops_count)
                                     ]
                                 ),
                             }
                         )
-                        for _ in range(buses)
+                        for _ in range(bus_count)
                     ]
                 ),
             }
@@ -203,7 +195,7 @@ class BusWorldEnv(gym.Env):
             spaces.Dict(
                 {
                     # index of bus we want to move
-                    "bus": spaces.Discrete(buses),
+                    "bus": spaces.Discrete(bus_count),
                     # new route the bus should be on
                     "new_route": spaces.Discrete(len(routes)),
                     "new_stop_index": spaces.Discrete(len(self.stops_adj_mat)),
@@ -227,12 +219,6 @@ class BusWorldEnv(gym.Env):
     def _get_info(self):
         return {}
 
-    def _get_routes(self):
-        return self.state["routes"]
-
-    def _get_buses(self):
-        return self.state["buses"]
-
     def get_full_state(self):
         return {
             "bus_speed": self.bus_speed,
@@ -249,7 +235,22 @@ class BusWorldEnv(gym.Env):
         super().reset(seed=seed)
         self.observation_space.seed(seed)
         self.state = self.observation_space.sample()
-        self.runtime_state = {"buses": []}
+        self.runtime_state = {"buses": [], "stops": []}
+        students_waiting = [0] * len(self.stops_adj_mat)
+        students_destination = [0] * len(self.stops_adj_mat)
+        for i, stops in enumerate(self.state["stops"]):
+            stops["students"] = list(stops["students"])
+            stops["students"][i] = 0  # students can't wait on stop they're already on
+            students_waiting[i] = np.sum(stops["students"])
+            for ci, count in enumerate(stops["students"]):
+                students_destination[ci] += count
+        for i, stops in enumerate(self.state["stops"]):
+            self.runtime_state["stops"].append(
+                {
+                    "students_waiting": students_waiting[i],
+                    "students_destination": students_destination[i],
+                }
+            )
         for bus in self.state["buses"]:
             # bus: { position, route, state, students }
             # bus (runtime): { timer, stop }
@@ -257,6 +258,22 @@ class BusWorldEnv(gym.Env):
             # fix positions of buses (to avoid exceeding bus route lengths)
             route = bus["route"]
             base_route = self.base_routes[route]
+            total_students = np.sum(bus["students"])
+            bus["students"] = list(bus["students"])
+            if total_students > self.settings["bus_size"]:
+                # if bus exceeds max size, then normalize it based on max bus size
+                # also set unreachable stops to 0
+                for i in range(len(bus["students"])):
+                    if i in base_route["stops_set"]:
+                        bus["students"][i] = int(
+                            np.round(
+                                bus["students"][i]
+                                / total_students
+                                * (self.settings["bus_size"] / len(self.stops_adj_mat))
+                            )
+                        )
+                    else:
+                        bus["students"][i] = 0
 
             if bus["position"][0] > base_route["length"]:
                 bus["position"][0] %= base_route["length"]
@@ -348,14 +365,52 @@ class BusWorldEnv(gym.Env):
                 bus["state"] = int(BusState.SWITCHING_ROUTE)
                 bus_runtime["timer"] = travel_time
                 bus_runtime["timer_duration"] = travel_time
+                bus["route"] = new_route_id
                 bus_runtime["stop_index"] = new_stop_index
             except:
                 print(f"⚠ Invalid action: {(bus_id, new_route_id, new_stop_index)}")
+
+        def unload(route, bus, bus_runtime, stop_id):
+            nonlocal reward
+            stop_runtime = self.runtime_state["stops"][stop_id]
+            students_getting_off = bus["students"][stop_id]
+            stop_runtime["students_destination"] -= students_getting_off
+            reward += students_getting_off
+            bus["students"][stop_id] = 0
+            print(
+                f"unload bus: {bus}, stop: {stop_id} stop_data: {self.state['stops'][stop_id]}"
+            )
+            stop_students = self.state["stops"][stop_id]["students"]
+            curr_bus_size = sum(bus["students"])
+            # enumerate students waiting at stop_id
+            for dest_id in range(len(stop_students)):
+                # if student's destination index is in our route, then
+                # the student will board the bus
+                if (
+                    dest_id in route["stops_set"]
+                    and curr_bus_size < self.settings["bus_size"]
+                ):
+                    # try to add everyone onto the bus, but limit it by capacity of bus
+                    add_amount = stop_students[dest_id]
+                    remaining_space = self.settings["bus_size"] - curr_bus_size
+                    if add_amount > remaining_space:
+                        add_amount = remaining_space
+
+                    print(
+                        f"  dest: {dest_id} stop_students: {stop_students} add_amount: {add_amount}?"
+                    )
+                    if add_amount > 0:
+                        curr_bus_size += add_amount
+                        bus["students"][dest_id] += add_amount
+                        stop_students[dest_id] -= add_amount
+                        stop_runtime["students_waiting"] -= add_amount
+                        print(f"    post add stop_students: {stop_students}")
 
         # simulate
         for bus_id, bus in enumerate(self.state["buses"]):
             route = self.base_routes[bus["route"]]
             bus_runtime = self.runtime_state["buses"][bus_id]
+            stop_id = route["stops"][bus_runtime["stop_index"]][0]
 
             # decrement timer
             if bus_runtime["timer"] >= 0:
@@ -379,6 +434,7 @@ class BusWorldEnv(gym.Env):
                             # Finished transporting bus to new route
                             # TODO: Actually move students off of bus, and new students onto bus
                             bus["state"] = int(BusState.AT_STOP_UNLOADING)
+                            unload(route, bus, bus_runtime, stop_id)
                             break
 
             # move bus
@@ -397,7 +453,7 @@ class BusWorldEnv(gym.Env):
                     else:
                         # unload students
                         bus["state"] = int(BusState.AT_STOP_UNLOADING)
-                        # TODO: Actually move students off of bus, and new students onto bus
+                        unload(route, bus, bus_runtime, stop_id)
 
         # TODO: Return reward
         # TODO: Terminate after X cycles
@@ -416,7 +472,8 @@ class BusWorldEnv(gym.Env):
             self.screen.fill(BG_COLOR)
             stops_count = len(self.stops_adj_mat)
             angle_interval = 2 * np.pi / stops_count
-            dist = self.window_size / 2 / 1.3
+            dist = self.window_size / 2 / 1.5
+            global_offset = (-self.window_size / 10, 0)
 
             pu.render_outline_text(
                 self.screen, (16, 16), self.font, "bus sim", 24, WHITE, BLACK, 2
@@ -435,8 +492,8 @@ class BusWorldEnv(gym.Env):
                 curr_angle = i * angle_interval
                 center = self.window_size / 2
                 pos = (
-                    self.window_size / 2 + dist * np.cos(curr_angle),
-                    self.window_size / 2 + dist * np.sin(curr_angle),
+                    global_offset[0] + self.window_size / 2 + dist * np.cos(curr_angle),
+                    global_offset[1] + self.window_size / 2 + dist * np.sin(curr_angle),
                 )
                 stop_pos_list.append(pos)
                 stop_size_list.append(1)
@@ -528,6 +585,7 @@ class BusWorldEnv(gym.Env):
 
                 dist_from_next = bus_runtime["dist_left"]
                 dist_from_next_percent = dist_from_next / prev_dist
+                students_on_bus = sum(bus["students"])
 
                 pos = pu.vec_interp(
                     stop_pos_list[stop_id],
@@ -545,7 +603,7 @@ class BusWorldEnv(gym.Env):
                         pos[Y] + int(BUS_RADIUS),
                     ),
                     self.font,
-                    str(i),
+                    f"{i}: {students_on_bus}/{self.settings['bus_size']}",
                     FONT_SIZE,
                     WHITE,
                     ROUTE_COLORS[route_id],
@@ -557,6 +615,12 @@ class BusWorldEnv(gym.Env):
                 radius = max(size, 2) * STOP_RADIUS
                 pygame.draw.circle(self.screen, BLACK, pos, radius + STOP_OUTLINE)
                 pygame.draw.circle(self.screen, WHITE, pos, radius)
+                students_waiting = self.runtime_state["stops"][i][
+                    "students_waiting"
+                ]  # students waiting at this stop
+                students_destination = self.runtime_state["stops"][i][
+                    "students_destination"
+                ]  # students whose destination is this stop
                 pu.render_outline_text(
                     self.screen,
                     (
@@ -564,7 +628,7 @@ class BusWorldEnv(gym.Env):
                         pos[Y] + int(radius + STOP_RADIUS),
                     ),
                     self.font,
-                    str(i),
+                    f"{i} (w: {students_waiting}, d: {students_destination})",
                     FONT_SIZE,
                     BLACK,
                     WHITE,
