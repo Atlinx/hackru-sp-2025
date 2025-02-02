@@ -1,3 +1,4 @@
+import pygame.freetype
 from bus_world_env import BusWorldEnv
 from neural_network import NeuralNetwork
 import numpy as np
@@ -8,7 +9,7 @@ state, _ = env.reset()
 pprint.pp(env.get_full_state())
 
 while True:
-    # env.step(None)
+    env.step([])
     env.render()
 
 
