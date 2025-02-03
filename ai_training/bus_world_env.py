@@ -259,21 +259,7 @@ class BusWorldEnv(gym.Env):
             route = bus["route"]
             base_route = self.base_routes[route]
             total_students = np.sum(bus["students"])
-            bus["students"] = list(bus["students"])
-            if total_students > self.settings["bus_size"]:
-                # if bus exceeds max size, then normalize it based on max bus size
-                # also set unreachable stops to 0
-                for i in range(len(bus["students"])):
-                    if i in base_route["stops_set"]:
-                        bus["students"][i] = int(
-                            np.round(
-                                bus["students"][i]
-                                / total_students
-                                * (self.settings["bus_size"] / len(self.stops_adj_mat))
-                            )
-                        )
-                    else:
-                        bus["students"][i] = 0
+            bus["students"] = [0] * len(bus["students"])
 
             if bus["position"][0] > base_route["length"]:
                 bus["position"][0] %= base_route["length"]
@@ -377,9 +363,6 @@ class BusWorldEnv(gym.Env):
             stop_runtime["students_destination"] -= students_getting_off
             reward += students_getting_off
             bus["students"][stop_id] = 0
-            print(
-                f"unload bus: {bus}, stop: {stop_id} stop_data: {self.state['stops'][stop_id]}"
-            )
             stop_students = self.state["stops"][stop_id]["students"]
             curr_bus_size = sum(bus["students"])
             # enumerate students waiting at stop_id
@@ -396,15 +379,11 @@ class BusWorldEnv(gym.Env):
                     if add_amount > remaining_space:
                         add_amount = remaining_space
 
-                    print(
-                        f"  dest: {dest_id} stop_students: {stop_students} add_amount: {add_amount}?"
-                    )
                     if add_amount > 0:
                         curr_bus_size += add_amount
                         bus["students"][dest_id] += add_amount
                         stop_students[dest_id] -= add_amount
                         stop_runtime["students_waiting"] -= add_amount
-                        print(f"    post add stop_students: {stop_students}")
 
         # simulate
         for bus_id, bus in enumerate(self.state["buses"]):
@@ -457,6 +436,13 @@ class BusWorldEnv(gym.Env):
 
         # TODO: Return reward
         # TODO: Terminate after X cycles
+
+        total_waiting = sum(
+            [x["students_waiting"] for x in self.runtime_state["stops"]]
+        )
+        total_dest = sum(
+            [x["students_destination"] for x in self.runtime_state["stops"]]
+        )
 
         return self._get_obs(), reward, terminated, truncated, self._get_info()
 
